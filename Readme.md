@@ -1,30 +1,29 @@
-# 🌏 EmotiCode: Multi-Script Emotion Classification in Low-Resource Languages
+# 🎙️ NPPE-2: Uyghur Automatic Speech Recognition (ASR) Challenge
 
-> **Kaggle Competition** · Jul 4–7, 2025 · Scored on Macro F1-Score (higher is better)
+> **Kaggle Competition** · Jul 26–29, 2025 · Scored on Character Error Rate (lower is better)
 
-Fine-tune Google's **Gemma-3-1B-IT** with QLoRA to classify emotions across three linguistically diverse, low-resource Indian language scripts — Santali (Ol Chiki), Kashmiri (Arabic), and Manipuri (Meitei Mayek).
+Transcribe Uyghur-language audio clips using a pre-trained **Whisper Small** model fine-tuned on Uyghur speech, with Unicode-aware post-processing to clean the output text.
 
+---
 
 ## 🎯 Problem Statement
 
-Classify the **emotion** expressed in short text samples written in three underrepresented Indian language scripts. The corruption challenge here is linguistic — these languages have extremely limited NLP resources, making standard transfer learning difficult.
+Build an **Automatic Speech Recognition (ASR)** system that transcribes audio clips in the **Uyghur language** — a Turkic language written in the Arabic script and severely underrepresented in modern ASR research.
 
-**6 target emotion classes:**
+**Evaluation metric:** Character Error Rate (CER) — lower is better, 0.0 is perfect.
 
-| Class | Approx. Share |
+```
+CER = (S + D + I) / N
+```
+
+| Symbol | Meaning |
 |---|---|
-| `fear` | 23.0% |
-| `happy` | 17.2% |
-| `surprise` | 15.8% |
-| `sad` | 15.7% |
-| `anger` | 15.3% |
-| `disgust` | 13.4% |
+| S | Substitutions |
+| D | Deletions |
+| I | Insertions |
+| N | Total characters in ground-truth reference |
 
-**Evaluation metric:** Macro F1-Score — equal weight to all six classes regardless of frequency. Range: [0.0, 1.0], higher is better.
-
-```
-Final Score = Macro F1 = (1/6) × Σ F1_per_emotion_class
-```
+CER is computed as the Levenshtein (edit) distance at the **character level**, making it especially sensitive to script-specific errors — critical for Arabic-script Uyghur where diacritics and character forms matter.
 
 ---
 
@@ -32,120 +31,155 @@ Final Score = Macro F1 = (1/6) × Σ F1_per_emotion_class
 
 ### Files
 
-| File | Description |
+| File / Folder | Description |
 |---|---|
-| `competition_train.csv` | 7,176 labeled training samples |
-| `competition_val.csv` | 2,392 labeled validation samples |
-| `competition_test.csv` | 2,392 unlabeled test samples |
-| `sample_submission.csv` | Submission template |
+| `wavs/` | 9,468 `.wav` audio clips, named by UUID |
+| `train.csv` | 7,574 labeled training samples |
+| `test.csv` | 1,894 unlabeled test samples |
+| `sample.csv` | Submission template with correct format |
 
-### Columns
+### CSV Schemas
+
+**`train.csv`**
 
 | Column | Description |
 |---|---|
-| `id` | Unique integer sample ID |
-| `Sentence` | Input text (in native script) |
-| `language` | Language tag: `Santali`, `Kashmiri`, or `Manipuri` |
-| `emotion` | Target label (absent in test set) |
+| `ID` | Unique identifier for the audio clip |
+| `filepath` | Relative path to the `.wav` file in `wavs/` |
+| `transcription` | Ground-truth Uyghur text transcription |
 
-### Language & Script Distribution
+**`test.csv`**
 
-| Language | Script | Samples (all splits) | Share |
-|---|---|---|---|
-| Santali | Ol Chiki | ~4,252 | 35.6% |
-| Kashmiri | Arabic | ~3,945 | 33.0% |
-| Manipuri | Meitei Mayek | ~3,763 | 31.4% |
+| Column | Description |
+|---|---|
+| `ID` | Unique identifier |
+| `filepath` | Relative path to the `.wav` file in `wavs/` |
 
-### Text Characteristics
+### Audio Characteristics
 
-- **Average length:** 101 characters
-- **Median length:** 98 characters
-- **Range:** 19–659 characters
+| Property | Value |
+|---|---|
+| Format | WAV |
+| Channels | Mono (single-channel) |
+| Sample rate | 16,000 Hz |
+| Total duration | ~23.95 hours |
+| Train samples | 7,574 |
+| Test samples | 1,894 |
+| Total clips | 9,468 |
 
 ---
 
 ## 🔍 Approach
 
-The solution treats emotion classification as a **generative text task** rather than a traditional classification head approach. The model is prompted to produce a single emotion word, leveraging the instruction-following capability of Gemma-3-1B-IT fine-tuned via QLoRA on the training pairs.
+This solution uses a **zero-shot / transfer inference** strategy: load a community Whisper checkpoint already fine-tuned on Uyghur speech, then run inference directly on the test set — no additional training required on the competition data.
 
-**Pipeline overview:**
+**Why this works:**
+- Uyghur is a low-resource language but has been addressed by community fine-tunes of OpenAI's Whisper
+- The checkpoint `ixxan/whisper-small-uyghur-thugy20` was trained specifically on Uyghur audio, giving strong out-of-the-box CER
+- The competition places **no restrictions** on models, compute, or external data, making pre-trained community checkpoints a valid and powerful strategy
+
+**Pipeline at a glance:**
 
 ```
-Raw multilingual text
-        │
-  [Prompt construction]  ← Sentence + Language tag
-        │
-  [Gemma-3-1B-IT + LoRA adapter]
-        │
-  [Generate (max 20 tokens)]
-        │
-  [Parse last word after prompt suffix]
-        │
-  Predicted emotion label
+Audio file (.wav)
+      │
+[torchaudio.load]  →  waveform tensor
+      │
+[Stereo → Mono]    →  mean over channels (if needed)
+      │
+[WhisperProcessor] →  log-Mel spectrogram features
+      │
+[WhisperForConditionalGeneration.generate]
+      │
+[processor.batch_decode]  →  raw transcription string
+      │
+[Unicode post-processing]  →  cleaned Uyghur text
+      │
+submission.csv
 ```
-
-**Why generative classification?**
-- Avoids adding a language-specific classification head
-- Leverages the model's existing multilingual understanding
-- Prompt engineering naturally constrains output to valid label space
-- Works well for low-resource scripts where tokenization is imperfect
 
 ---
 
-## 🏗️ Model & Fine-Tuning
+## 🏗️ Model Architecture
 
-### Base Model
+**Checkpoint:** `ixxan/whisper-small-uyghur-thugy20`
+
+A community fine-tune of OpenAI's **Whisper Small** on the THUGY-20 Uyghur speech dataset.
+
+### Whisper Small — Architecture Summary
 
 ```
-google/gemma-3-1b-it
+Input: log-Mel spectrogram (80 mel bins)
+
+Encoder
+├── Conv1d stem: 80 → 768 (kernel 3, stride 1)
+├── Conv1d downsample: 768 → 768 (kernel 3, stride 2)
+├── Positional embedding: 1500 positions × 768
+└── 12 × WhisperEncoderLayer
+    ├── SdpaAttention (Q/K/V: 768 → 768)
+    ├── LayerNorm
+    └── FFN: 768 → 3072 → 768
+
+Decoder
+├── Token embedding: 51865 vocab × 768
+├── Positional embedding: 448 positions × 768
+└── 12 × WhisperDecoderLayer
+    ├── Masked self-attention (768)
+    ├── Cross-attention to encoder output (768)
+    └── FFN: 768 → 3072 → 768
+
+Output projection: 768 → 51865 (vocab logits)
 ```
-Gemma 3 1B Instruct — mandatory per competition rules. No other base models permitted.
 
-### Quantization: QLoRA (4-bit NF4)
+**Key specs:**
 
-The model is loaded in 4-bit precision to fit within T4 GPU memory constraints:
-
-```python
-BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_use_double_quant=True,   # nested quantization for extra memory savings
-    bnb_4bit_quant_type="nf4",        # NormalFloat4 — optimal for normally distributed weights
-    bnb_4bit_compute_dtype=torch.bfloat16
-)
-```
-
-### LoRA Adapter
-
-Parameter-efficient fine-tuning via `peft.LoraConfig` applied on top of the quantized base, trained with `trl.SFTTrainer` using a custom formatting function that wraps each training sample into the inference prompt template.
-
-### Training Duration
-
-Training ran for approximately **~4 hours 38 minutes** on a single Tesla T4 GPU (Kaggle Notebook, 15.6 GB VRAM).
+| Parameter | Value |
+|---|---|
+| Hidden size | 768 |
+| Encoder layers | 12 |
+| Decoder layers | 12 |
+| FFN dimension | 3,072 |
+| Vocabulary size | 51,865 |
+| Max audio length | ~30 seconds (1,500 spectrogram frames) |
+| Max decode length | 448 tokens |
 
 ---
 
-## 💬 Prompt Design
+## 🧹 Post-Processing
 
-A consistent prompt template is used for both training (via `formatting_func`) and inference:
-
-```
-Sentence: {sentence}, Language: {language}
-What is the emotion expressed in this sentence?
-Only respond with one word, choosing exactly one of [disgust, anger, sad, happy, fear, surprise].
-Answer in lowercase letters only:
-```
-
-**Design decisions:**
-- Including the `Language` field gives the model explicit script context, aiding cross-lingual transfer
-- Constraining the output to a closed set of six words via the prompt reduces hallucination
-- The suffix `Answer in lowercase letters only:` acts as a reliable split point during output parsing
-
-**Output parsing:**
+Raw Whisper output may contain encoding artifacts and punctuation that hurt CER. A Unicode-aware cleaning step is applied after initial decoding:
 
 ```python
-decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
-emotion = decoded.split("Answer in lowercase letters only:")[-1].strip().lower()
+def clean_text(text):
+    # Fix any latin1/utf-8 mojibake
+    fixed = text.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+    # Remove punctuation (keep word characters and whitespace)
+    fixed = re.sub(r"[^\w\s]", "", fixed)
+    # NFKC normalization: unify Unicode variants of the same character
+    fixed = unicodedata.normalize("NFKC", fixed)
+    # Lowercase and strip leading/trailing whitespace
+    fixed = fixed.lower().strip()
+    return fixed
 ```
+
+**Why each step matters for Uyghur Arabic script:**
+
+| Step | Reason |
+|---|---|
+| `latin1 → utf-8` re-encoding | Guards against mojibake from mixed-encoding audio metadata |
+| Punctuation removal | CER penalizes extra characters; Uyghur ASR output often includes stray Arabic punctuation |
+| NFKC normalization | Collapses compatibility variants (e.g., Arabic letter forms, ligatures) to canonical forms, preventing false character mismatches |
+| Lowercase | Ensures case-insensitive comparison where applicable |
+
+---
+
+## 📊 Evaluation
+
+CER is computed between the cleaned predicted transcription and the hidden ground-truth text. The character-level metric is particularly meaningful for Uyghur because:
+
+- Arabic script encodes vowels as diacritics — a single wrong diacritic counts as one character error
+- Connected letter forms mean segmentation errors cascade into multiple character errors
+- Correct NFKC normalization is essential to avoid spurious mismatches on equivalent Unicode representations
 
 ---
 
@@ -153,15 +187,12 @@ emotion = decoded.split("Answer in lowercase letters only:")[-1].strip().lower()
 
 | Package | Purpose |
 |---|---|
-| `transformers` | Model loading, tokenization, generation |
-| `peft` | LoRA adapter — `LoraConfig`, `PeftModel` |
-| `trl` | Supervised fine-tuning — `SFTTrainer` |
-| `bitsandbytes` | 4-bit quantization (QLoRA) |
-| `accelerate` | Device management and distributed support |
-| `datasets` | HuggingFace dataset utilities |
-| `torch` | Core deep learning framework |
-| `pandas` | CSV I/O and data manipulation |
-| `scikit-learn` | `f1_score`, `classification_report` |
-| `tqdm` | Progress bars during inference |
+| `transformers` | `WhisperProcessor`, `WhisperForConditionalGeneration` |
+| `torchaudio` | Audio file loading and resampling |
+| `torch` | GPU inference |
+| `pandas` | CSV I/O |
+| `tqdm` | Progress bars |
+| `unicodedata` | NFKC Unicode normalization (stdlib) |
+| `re` | Punctuation removal (stdlib) |
 
-**Hardware:** Single NVIDIA Tesla T4 (15.6 GB VRAM) via Kaggle Notebooks with GPU acceleration.
+**Hardware:** Single NVIDIA Tesla T4 via Kaggle Notebooks with GPU acceleration enabled.
